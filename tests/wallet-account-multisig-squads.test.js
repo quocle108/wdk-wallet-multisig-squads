@@ -24,6 +24,8 @@ import {
   appendTransactionMessageInstructions,
   compressTransactionMessageUsingAddressLookupTables,
   createTransactionMessage,
+  getCompiledTransactionMessageDecoder,
+  getCompiledTransactionMessageEncoder,
   setTransactionMessageFeePayer,
   setTransactionMessageLifetimeUsingBlockhash
 } from '@solana/transaction-messages'
@@ -553,6 +555,30 @@ function compressedBundleOf (instructions, borrowed) {
     (m) => appendTransactionMessageInstructions(instructions, m),
     (m) => compressTransactionMessageUsingAddressLookupTables(m, { [TEST_LOOKUP_TABLE]: borrowed })
   ))
+}
+
+/**
+ * The same bundle with one instruction's program named by a lookup table index instead of a static
+ * one. The SDK will not compile that, because the cluster will not run it, but a coordinator
+ * writing the bytes itself can.
+ *
+ * @param {Object} bundle - The compiled bundle.
+ * @param {number} at - The instruction whose program is borrowed.
+ * @returns {Object} The bundle, with that instruction's program borrowed.
+ */
+function borrowedProgramIn (bundle, at) {
+  const message = getCompiledTransactionMessageDecoder().decode(bundle.messageBytes)
+
+  return {
+    ...bundle,
+    messageBytes: new Uint8Array(getCompiledTransactionMessageEncoder().encode({
+      ...message,
+      instructions: message.instructions.map((instruction, index) => index === at
+        ? { ...instruction, programAddressIndex: message.staticAccounts.length }
+        : instruction
+      )
+    }))
+  }
 }
 
 /**
@@ -3559,6 +3585,38 @@ describe('WalletAccountMultisigSquads', () => {
 
       expect(getTransactionDecoder().decode(getBase64Encoder().encode(broadcast)).messageBytes)
         .toEqual(bundle.messageBytes)
+    })
+
+    it('refuses an instruction whose program is borrowed from a lookup table', async () => {
+      const { account, coordinator } = await accountWithCoordinator()
+
+      coordinator.getProposal.mockResolvedValue(borrowedProgramIn(
+        compressedBundleOf([approvalOf(TEST_SIGNER), executionOf()], [TEST_VAULT_PDA]), 1
+      ))
+
+      const rpc = stubSolanaRpc({
+        getMultipleAccounts: ([addresses]) => addresses.includes(TEST_LOOKUP_TABLE)
+          ? serveValue([lookupTableAccount(
+            ADDRESS_LOOKUP_TABLE_PROGRAM,
+            [getBase58Encoder().encode(TEST_VAULT_PDA)]
+          )])
+          : serveValue([
+            multisigAccountValue(
+              [{ address: TEST_SIGNER, mask: 7 }, { address: OTHER_MEMBER, mask: 7 }],
+              { threshold: 1, transactionIndex: 7n }
+            ),
+            proposalAccountValue({})
+          ]),
+        sendTransaction: () => DUMMY_EXECUTE_HASH
+      })
+
+      await expect(account.approveProposal(3)).rejects.toThrow(
+        new ValueError(
+          `The bundle the coordinator holds for the proposal ${TEST_PROPOSAL_PDA_3} carries an instruction whose program is not among the 4 accounts the bundle itself carries, and a member signs every instruction in it.`
+        )
+      )
+      expect(coordinator.confirmProposal).not.toHaveBeenCalled()
+      expect(rpcRequests(rpc, 'sendTransaction')).toEqual([])
     })
 
     it('refuses a bundle whose lookup table cannot be read', async () => {
