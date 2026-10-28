@@ -3470,7 +3470,6 @@ describe('WalletAccountMultisigSquads', () => {
           ),
           proposalAccountValue({})
         ]),
-        getFeeForMessage: () => serveValue(SIGNATURE_FEE),
         sendTransaction: () => DUMMY_VOTE_HASH
       })
 
@@ -3594,6 +3593,85 @@ describe('WalletAccountMultisigSquads', () => {
         ...bundle,
         signatures: { [TEST_SIGNER]: bundle.signatures[TEST_SIGNER] }
       })
+
+      stubSolanaRpc({
+        getMultipleAccounts: () => serveValue([
+          multisigAccountValue(
+            [{ address: TEST_SIGNER, mask: 7 }, { address: OTHER_MEMBER, mask: 7 }],
+            { threshold: 2, transactionIndex: 7n }
+          ),
+          proposalAccountValue({})
+        ])
+      })
+
+      await expect(account.approveProposal(3)).rejects.toThrow(
+        new MaximumFeeExceededError('Exceeded maximum fee cost for the approve operation.')
+      )
+      expect(coordinator.confirmProposal).not.toHaveBeenCalled()
+    })
+
+    it('refuses a compute budget instruction it cannot read', async () => {
+      const { account, coordinator } = await accountWithCoordinator()
+
+      coordinator.getProposal.mockResolvedValue(bundleOf([
+        { programAddress: COMPUTE_BUDGET_PROGRAM, accounts: [], data: new Uint8Array([3, 1, 2]) },
+        approvalOf(TEST_SIGNER)
+      ]))
+
+      stubSolanaRpc({
+        getMultipleAccounts: () => serveValue([
+          multisigAccountValue(
+            [{ address: TEST_SIGNER, mask: 7 }, { address: OTHER_MEMBER, mask: 7 }],
+            { threshold: 2, transactionIndex: 7n }
+          ),
+          proposalAccountValue({})
+        ])
+      })
+
+      await expect(account.approveProposal(3)).rejects.toThrow(
+        new ValueError(
+          `The bundle the coordinator holds for the proposal ${TEST_PROPOSAL_PDA_3} carries a compute budget instruction this account cannot read, and a member signs every instruction in it.`
+        )
+      )
+      expect(coordinator.confirmProposal).not.toHaveBeenCalled()
+    })
+
+    it('prices a limit above the chain maximum at the maximum', async () => {
+      // 4,000,000 units clamp to 1,400,000, which at this price buys 1,400 lamports. The ceiling
+      // leaves room for exactly that, and for nothing the unclamped figure would have cost.
+      const { account, coordinator } = await accountWithCoordinator({ approveMaxFee: SIGNATURE_FEE + 1_400n })
+
+      coordinator.getProposal.mockResolvedValue(bundleOf([
+        computeUnitPrice(1_000n),
+        computeUnitLimit(4_000_000),
+        approvalOf(TEST_SIGNER)
+      ]))
+
+      stubSolanaRpc({
+        getMultipleAccounts: () => serveValue([
+          multisigAccountValue(
+            [{ address: TEST_SIGNER, mask: 7 }, { address: OTHER_MEMBER, mask: 7 }],
+            { threshold: 2, transactionIndex: 7n }
+          ),
+          proposalAccountValue({})
+        ]),
+        getFeeForMessage: () => serveValue(BUNDLE_FEE),
+        sendTransaction: () => DUMMY_VOTE_HASH
+      })
+
+      const result = await account.approveProposal(3)
+
+      expect(coordinator.confirmProposal).toHaveBeenCalledWith('3', expect.any(String))
+      expect(result.transaction).toEqual({ hash: DUMMY_VOTE_HASH, fee: BUNDLE_FEE })
+    })
+
+    it('bounds a bundle the coordinator pays for when a ceiling is configured', async () => {
+      const { account, coordinator } = await accountWithCoordinator({ approveMaxFee: BUNDLE_FEE })
+
+      coordinator.getProposal.mockResolvedValue(bundleOf([
+        computeUnitPrice(9_279_639n),
+        approvalOf(TEST_SIGNER)
+      ], OTHER_MEMBER))
 
       stubSolanaRpc({
         getMultipleAccounts: () => serveValue([
