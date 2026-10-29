@@ -585,7 +585,10 @@ export default class WalletAccountMultisigSquads extends WalletAccountReadOnlyMu
       }
     }
 
-    const requested = units ?? BigInt(COMPUTE_UNITS_PER_INSTRUCTION * instructions.length)
+    const granted = instructions.filter(
+      (instruction) => accounts[instruction.programAddressIndex] !== COMPUTE_BUDGET_PROGRAM_ADDRESS
+    ).length
+    const requested = units ?? BigInt(COMPUTE_UNITS_PER_INSTRUCTION * granted)
     const budget = requested > MAX_COMPUTE_UNITS ? MAX_COMPUTE_UNITS : requested
     const baseFee = SIGNATURE_BASE_FEE * BigInt(header.numSignerAccounts)
     const priorityFee =

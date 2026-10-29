@@ -3610,6 +3610,52 @@ describe('WalletAccountMultisigSquads', () => {
       expect(coordinator.confirmProposal).not.toHaveBeenCalled()
     })
 
+    it('prices a bundle the way the cluster does', async () => {
+      // Each row was quoted on an Agave 2.1.0 validator with getFeeForMessage.
+      const quoted = [
+        [[approvalOf(TEST_SIGNER)], 5_000n],
+        [[computeUnitPrice(1_000_000n), computeUnitLimit(300_000), approvalOf(TEST_SIGNER)], 305_000n],
+        [[computeUnitPrice(3n), computeUnitLimit(300_000), approvalOf(TEST_SIGNER)], 5_001n],
+        [[computeUnitPrice(1_000_000n), computeUnitLimit(2_000_000), approvalOf(TEST_SIGNER)], 1_405_000n],
+        [[computeUnitPrice(1_000_000n), approvalOf(TEST_SIGNER)], 205_000n],
+        [[computeUnitPrice(1_000_000n), approvalOf(TEST_SIGNER), approvalOf(OTHER_MEMBER)], 410_000n]
+      ]
+
+      for (const [instructions, fee] of quoted) {
+        const under = await accountWithCoordinator({ approveMaxFee: fee - 1n })
+        under.coordinator.getProposal.mockResolvedValue(bundleOf(instructions))
+        stubSolanaRpc({
+          getMultipleAccounts: () => serveValue([
+            multisigAccountValue(
+              [{ address: TEST_SIGNER, mask: 7 }, { address: OTHER_MEMBER, mask: 7 }],
+              { threshold: 2, transactionIndex: 7n }
+            ),
+            proposalAccountValue({})
+          ])
+        })
+
+        await expect(under.account.approveProposal(3)).rejects.toThrow(
+          new MaximumFeeExceededError('Exceeded maximum fee cost for the approve operation.')
+        )
+
+        const at = await accountWithCoordinator({ approveMaxFee: fee })
+        at.coordinator.getProposal.mockResolvedValue(bundleOf(instructions))
+        stubSolanaRpc({
+          getMultipleAccounts: () => serveValue([
+            multisigAccountValue(
+              [{ address: TEST_SIGNER, mask: 7 }, { address: OTHER_MEMBER, mask: 7 }],
+              { threshold: 2, transactionIndex: 7n }
+            ),
+            proposalAccountValue({})
+          ]),
+          getFeeForMessage: () => serveValue(BUNDLE_FEE),
+          sendTransaction: () => DUMMY_VOTE_HASH
+        })
+
+        await expect(at.account.approveProposal(3)).resolves.toMatchObject({ proposalId: '3' })
+      }
+    })
+
     it('refuses a compute budget instruction it cannot read', async () => {
       const { account, coordinator } = await accountWithCoordinator()
 
