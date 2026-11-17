@@ -3480,39 +3480,12 @@ describe('WalletAccountMultisigSquads', () => {
       expect(result.transaction).toEqual({ hash: DUMMY_VOTE_HASH, fee: BUNDLE_FEE })
     })
 
-    it('refuses a priority fee it is charged with no ceiling configured', async () => {
+    it('signs a priority fee with no ceiling configured', async () => {
       const { account, coordinator } = await accountWithCoordinator()
 
       coordinator.getProposal.mockResolvedValue(bundleOf([
         computeUnitPrice(9_279_639n),
         approvalOf(TEST_SIGNER)
-      ]))
-
-      const rpc = stubSolanaRpc({
-        getMultipleAccounts: () => serveValue([
-          multisigAccountValue(
-            [{ address: TEST_SIGNER, mask: 7 }, { address: OTHER_MEMBER, mask: 7 }],
-            { threshold: 2, transactionIndex: 7n }
-          ),
-          proposalAccountValue({})
-        ]),
-        sendTransaction: () => DUMMY_VOTE_HASH
-      })
-
-      await expect(account.approveProposal(3)).rejects.toThrow(
-        new MaximumFeeExceededError('Exceeded maximum fee cost for the approve operation.')
-      )
-      expect(coordinator.confirmProposal).not.toHaveBeenCalled()
-      expect(rpcRequests(rpc, 'sendTransaction')).toEqual([])
-    })
-
-    it('refuses one it is charged for before handing its signature over, finished or not', async () => {
-      const { account, coordinator } = await accountWithCoordinator()
-
-      coordinator.getProposal.mockResolvedValue(bundleOf([
-        computeUnitPrice(9_279_639n),
-        approvalOf(TEST_SIGNER),
-        approvalOf(OTHER_MEMBER)
       ]))
 
       stubSolanaRpc({
@@ -3522,13 +3495,15 @@ describe('WalletAccountMultisigSquads', () => {
             { threshold: 2, transactionIndex: 7n }
           ),
           proposalAccountValue({})
-        ])
+        ]),
+        getFeeForMessage: () => serveValue(BUNDLE_FEE),
+        sendTransaction: () => DUMMY_VOTE_HASH
       })
 
-      await expect(account.approveProposal(3)).rejects.toThrow(
-        new MaximumFeeExceededError('Exceeded maximum fee cost for the approve operation.')
-      )
-      expect(coordinator.confirmProposal).not.toHaveBeenCalled()
+      const result = await account.approveProposal(3)
+
+      expect(coordinator.confirmProposal).toHaveBeenCalledWith('3', expect.any(String))
+      expect(result.transaction).toEqual({ hash: DUMMY_VOTE_HASH, fee: BUNDLE_FEE })
     })
 
     it('refuses a priority fee the cluster prices below the ceiling', async () => {

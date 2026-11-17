@@ -181,9 +181,8 @@ What the account does with what you return, which is the part you can rely on:
 - It prices the bundle from its own compute budget before signing and refuses above
   `approveMaxFee`. A compute budget instruction is allowed through, except the deprecated unit
   request that carries a fee of its own, and it is what buys a priority fee, so the ceiling is what
-  bounds the lamports a bundle can cost the fee payer. Leave the option unset and a bundle the
-  member itself pays for may buy no priority fee at all, while one it does not pay for is bounded
-  by nothing.
+  bounds the lamports a bundle can cost the fee payer. Leave the option unset and the fee is not
+  checked, as in every other WDK wallet.
 - It never appends to the transaction and never recompiles it, so signatures already collected
   stay valid. Address lookup tables are fine for the accounts it does not read the bundle by, but
   the ones it does, every instruction's program and the multisig, the proposal and the approving
@@ -202,14 +201,14 @@ What the account does with what you return, which is the part you can rely on:
 > per-instruction signing, so the account's checks on the bundle, listed above, are the only limit
 > on what a coordinator can get signed, and they do not reach everything: they bound the
 > instructions the bundle carries, but not the stored message an execution riding along would run,
-> and not the priority fee a bundle the member does not pay for sets, unless `approveMaxFee` is
-> there to bound it. They narrow the damage to this proposal; they do not make an unknown
-> coordinator safe to point at.
+> and not the priority fee a bundle sets, unless `approveMaxFee` is there to bound it. They narrow
+> the damage to this proposal; they do not make an unknown coordinator safe to point at.
 >
 > Two more they never reach. Which account pays: the fee payer is fixed when the bundle is compiled,
-> so a member signing one that names itself is agreeing to pay what the ceiling allows. And how long
-> that signature stays usable: a bundle carrying a durable nonce keeps it valid until the nonce
-> advances, so one left in a transport can land after the member has voted otherwise on chain.
+> so a member signing one that names itself is agreeing to pay what `approveMaxFee` allows, or
+> anything when it is unset. And how long that signature stays usable: a bundle carrying a durable
+> nonce keeps it valid until the nonce advances, so one left in a transport can land after the
+> member has voted otherwise on chain.
 
 ## Fees, rent, and who pays
 
