@@ -182,8 +182,9 @@ What the account does with what you return, which is the part you can rely on:
   `approveMaxFee`. A compute budget instruction is allowed through, except the deprecated unit
   request that carries a fee of its own, and it is what buys a priority fee, so the ceiling is what
   bounds the lamports a bundle can cost the fee payer. The ceiling applies only when the member is
-  the bundle's fee payer. Leave the option unset and the fee is not checked, as in every other WDK
-  wallet.
+  the bundle's fee payer, and such a bundle must name a compute unit limit when it sets a priority
+  price, since the cluster's default budget can't be priced from the bundle. Leave the option unset
+  and the fee is not checked, as in every other WDK wallet.
 - It never appends to the transaction and never recompiles it, so signatures already collected
   stay valid. Address lookup tables are fine for the accounts it does not read the bundle by, but
   the ones it does, every instruction's program and the multisig, the proposal and the approving

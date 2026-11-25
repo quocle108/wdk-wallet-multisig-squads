@@ -3432,6 +3432,7 @@ describe('WalletAccountMultisigSquads', () => {
       // fee, so the ceiling is the only thing standing between the member and it.
       coordinator.getProposal.mockResolvedValue(bundleOf([
         computeUnitPrice(1_000_000_000n),
+        computeUnitLimit(200_000),
         approvalOf(TEST_SIGNER)
       ]))
 
@@ -3458,6 +3459,7 @@ describe('WalletAccountMultisigSquads', () => {
 
       coordinator.getProposal.mockResolvedValue(bundleOf([
         computeUnitPrice(1n),
+        computeUnitLimit(200_000),
         approvalOf(TEST_SIGNER)
       ]))
 
@@ -3511,6 +3513,7 @@ describe('WalletAccountMultisigSquads', () => {
 
       coordinator.getProposal.mockResolvedValue(bundleOf([
         computeUnitPrice(9_279_639n),
+        computeUnitLimit(200_000),
         approvalOf(TEST_SIGNER)
       ]))
 
@@ -3532,9 +3535,8 @@ describe('WalletAccountMultisigSquads', () => {
       expect(rpcRequests(rpc, 'getFeeForMessage')).toEqual([])
     })
 
-    it('prices the compute units the bundle asks for, not the ones it would be granted', async () => {
-      // The account grants three instructions 600,000 units when a bundle names no limit, which at
-      // this price costs 600 lamports on top of the signature. The limit it names buys 1,400.
+    it('prices the compute units the bundle asks for', async () => {
+      // At this price the limit the bundle names buys 1,400 lamports on top of the signature.
       const { account, coordinator } = await accountWithCoordinator({ approveMaxFee: SIGNATURE_FEE + 1_000n })
 
       coordinator.getProposal.mockResolvedValue(bundleOf([
@@ -3612,14 +3614,13 @@ describe('WalletAccountMultisigSquads', () => {
     })
 
     it('prices a bundle the way the cluster does', async () => {
-      // Each row was quoted on an Agave 2.1.0 validator with getFeeForMessage.
+      // Each row matches getFeeForMessage on an Agave validator (2.1.0 and 3.1.13).
       const quoted = [
         [[approvalOf(TEST_SIGNER)], 5_000n],
         [[computeUnitPrice(1_000_000n), computeUnitLimit(300_000), approvalOf(TEST_SIGNER)], 305_000n],
         [[computeUnitPrice(3n), computeUnitLimit(300_000), approvalOf(TEST_SIGNER)], 5_001n],
         [[computeUnitPrice(1_000_000n), computeUnitLimit(2_000_000), approvalOf(TEST_SIGNER)], 1_405_000n],
-        [[computeUnitPrice(1_000_000n), approvalOf(TEST_SIGNER)], 205_000n],
-        [[computeUnitPrice(1_000_000n), approvalOf(TEST_SIGNER), approvalOf(OTHER_MEMBER)], 410_000n]
+        [[computeUnitPrice(0n), approvalOf(TEST_SIGNER)], 5_000n]
       ]
 
       for (const [instructions, fee] of quoted) {
@@ -3655,6 +3656,34 @@ describe('WalletAccountMultisigSquads', () => {
 
         await expect(at.account.approveProposal(3)).resolves.toMatchObject({ proposalId: '3' })
       }
+    })
+
+    it('refuses a priority fee without a compute unit limit when the signer pays and a ceiling is set', async () => {
+      // Without a limit the cluster grants a default budget that depends on its own rules, so the
+      // fee the signer would pay cannot be bounded from the bundle.
+      const { account, coordinator } = await accountWithCoordinator({ approveMaxFee: BUNDLE_FEE })
+
+      coordinator.getProposal.mockResolvedValue(bundleOf([
+        computeUnitPrice(1n),
+        approvalOf(TEST_SIGNER)
+      ]))
+
+      stubSolanaRpc({
+        getMultipleAccounts: () => serveValue([
+          multisigAccountValue(
+            [{ address: TEST_SIGNER, mask: 7 }, { address: OTHER_MEMBER, mask: 7 }],
+            { threshold: 2, transactionIndex: 7n }
+          ),
+          proposalAccountValue({})
+        ])
+      })
+
+      await expect(account.approveProposal(3)).rejects.toThrow(
+        new ValueError(
+          `The bundle the coordinator holds for the proposal 3 sets a priority fee without a compute unit limit, so its fee cannot be checked against the approve fee ceiling.`
+        )
+      )
+      expect(coordinator.confirmProposal).not.toHaveBeenCalled()
     })
 
     it('refuses a compute budget instruction it cannot read', async () => {

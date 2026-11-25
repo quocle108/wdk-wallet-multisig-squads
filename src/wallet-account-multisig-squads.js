@@ -123,7 +123,6 @@ const BUNDLE_INSTRUCTION = [
   { discriminator: INSTRUCTION_DISCRIMINATOR.configTransactionExecute, proposal: 2 }
 ]
 
-const COMPUTE_UNITS_PER_INSTRUCTION = 200_000
 const MAX_COMPUTE_UNITS = BigInt(MAX_COMPUTE_UNIT_LIMIT)
 const MICRO_LAMPORTS_PER_LAMPORT = 1_000_000n
 
@@ -396,7 +395,7 @@ export default class WalletAccountMultisigSquads extends WalletAccountReadOnlyMu
    * @param {number | bigint | string} proposalId - The proposal (transaction index) id.
    * @param {MultisigSquadsTransactionOptions} [transactionOptions] - The multisig transaction's options. `memo` is the note recorded on chain with the vote. `autoExecute` executes the proposal in the same transaction only when it can: this approval reaching the threshold, no time lock, and a signer holding execute on top of the vote. Where it does not apply, it goes inert and the result's `status` stays `'pending'` rather than throwing. `vaultIndex` does not bear on a vote. None of the three applies to a coordinator's bundle, which has decided them already.
    * @returns {Promise<MultisigSquadsProposalResult>} The approval result. `status` is `'executed'` when the execution ran in the same transaction, in which case `transaction` is that execution rather than a bare submission. Through a coordinator, `fee` is what the cluster quotes for the bundle's own fee payer, which is not the figure `approveMaxFee` bounds. A vote that only circulated adds nothing to `confirmations`, which the chain still governs; it counts in `pendingConfirmations`, with the other approvals the bundle has collected a signature for, and reports `transaction: undefined`.
-   * @throws {ValueError} The signer must not have approved the proposal already, a coordinator's bundle must carry this signer's approval and no member's twice, the accounts that bundle is read by, every instruction's program and the multisig, the proposal and the approving member, must be static rather than borrowed from an address lookup table, and it must ask for compute units the current way rather than the deprecated one that carries a fee of its own, in an instruction this account can read.
+   * @throws {ValueError} The signer must not have approved the proposal already, a coordinator's bundle must carry this signer's approval and no member's twice, the accounts that bundle is read by, every instruction's program and the multisig, the proposal and the approving member, must be static rather than borrowed from an address lookup table, and it must ask for compute units the current way rather than the deprecated one that carries a fee of its own, in an instruction this account can read. With `approveMaxFee` set, a bundle the signer pays for must not set a priority fee without a compute unit limit.
    * @throws {MaximumFeeExceededError} A coordinator's bundle the signer pays for must cost within `approveMaxFee`; a bundle someone else pays for, or no `approveMaxFee`, is not checked.
    */
   async approveProposal (proposalId, { memo, autoExecute } = {}) {
@@ -434,8 +433,16 @@ export default class WalletAccountMultisigSquads extends WalletAccountReadOnlyMu
 
       const { approveMaxFee } = this._config
 
-      if (approveMaxFee !== undefined && feePayer === signerAddress && fee > BigInt(approveMaxFee)) {
-        throw new MaximumFeeExceededError('Exceeded maximum fee cost for the approve operation.')
+      if (approveMaxFee !== undefined && feePayer === signerAddress) {
+        if (fee === null) {
+          throw new ValueError(
+            `The bundle the coordinator holds for the proposal ${index} sets a priority fee without a compute unit limit, so its fee cannot be checked against the approve fee ceiling.`
+          )
+        }
+
+        if (fee > BigInt(approveMaxFee)) {
+          throw new MaximumFeeExceededError('Exceeded maximum fee cost for the approve operation.')
+        }
       }
 
       const signed = await partiallySignTransaction(
@@ -888,16 +895,18 @@ export default class WalletAccountMultisigSquads extends WalletAccountReadOnlyMu
       }
     }
 
-    const granted = instructions.filter(
-      (instruction) => accounts[instruction.programAddressIndex] !== COMPUTE_BUDGET_PROGRAM_ADDRESS
-    ).length
-    const requested = units ?? BigInt(COMPUTE_UNITS_PER_INSTRUCTION * granted)
-    const budget = requested > MAX_COMPUTE_UNITS ? MAX_COMPUTE_UNITS : requested
+    const feePayer = staticAccounts[0]
     const baseFee = SIGNATURE_BASE_FEE * BigInt(header.numSignerAccounts)
+
+    if (units === null) {
+      return { approvers, executes, feePayer, fee: price === 0n ? baseFee : null }
+    }
+
+    const budget = units > MAX_COMPUTE_UNITS ? MAX_COMPUTE_UNITS : units
     const priorityFee =
       (price * budget + MICRO_LAMPORTS_PER_LAMPORT - 1n) / MICRO_LAMPORTS_PER_LAMPORT
 
-    return { approvers, executes, feePayer: staticAccounts[0], fee: baseFee + priorityFee }
+    return { approvers, executes, feePayer, fee: baseFee + priorityFee }
   }
 
   /** @private */
