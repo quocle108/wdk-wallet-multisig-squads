@@ -3712,7 +3712,7 @@ describe('WalletAccountMultisigSquads', () => {
       expect(result.transaction).toEqual({ hash: DUMMY_VOTE_HASH, fee: BUNDLE_FEE })
     })
 
-    it('bounds a bundle the coordinator pays for when a ceiling is configured', async () => {
+    it('signs a bundle someone else pays for above the ceiling, since the ceiling bounds only what the signer pays', async () => {
       const { account, coordinator } = await accountWithCoordinator({ approveMaxFee: BUNDLE_FEE })
 
       coordinator.getProposal.mockResolvedValue(bundleOf([
@@ -3730,10 +3730,10 @@ describe('WalletAccountMultisigSquads', () => {
         ])
       })
 
-      await expect(account.approveProposal(3)).rejects.toThrow(
-        new MaximumFeeExceededError('Exceeded maximum fee cost for the approve operation.')
-      )
-      expect(coordinator.confirmProposal).not.toHaveBeenCalled()
+      const result = await account.approveProposal(3)
+
+      expect(coordinator.confirmProposal).toHaveBeenCalledWith('3', expect.any(String))
+      expect(result.transaction).toBeUndefined()
     })
 
     it('takes a bundle the coordinator pays for itself', async () => {

@@ -397,7 +397,7 @@ export default class WalletAccountMultisigSquads extends WalletAccountReadOnlyMu
    * @param {MultisigSquadsTransactionOptions} [transactionOptions] - The multisig transaction's options. `memo` is the note recorded on chain with the vote. `autoExecute` executes the proposal in the same transaction only when it can: this approval reaching the threshold, no time lock, and a signer holding execute on top of the vote. Where it does not apply, it goes inert and the result's `status` stays `'pending'` rather than throwing. `vaultIndex` does not bear on a vote. None of the three applies to a coordinator's bundle, which has decided them already.
    * @returns {Promise<MultisigSquadsProposalResult>} The approval result. `status` is `'executed'` when the execution ran in the same transaction, in which case `transaction` is that execution rather than a bare submission. Through a coordinator, `fee` is what the cluster quotes for the bundle's own fee payer, which is not the figure `approveMaxFee` bounds. A vote that only circulated adds nothing to `confirmations`, which the chain still governs; it counts in `pendingConfirmations`, with the other approvals the bundle has collected a signature for, and reports `transaction: undefined`.
    * @throws {ValueError} The signer must not have approved the proposal already, a coordinator's bundle must carry this signer's approval and no member's twice, the accounts that bundle is read by, every instruction's program and the multisig, the proposal and the approving member, must be static rather than borrowed from an address lookup table, and it must ask for compute units the current way rather than the deprecated one that carries a fee of its own, in an instruction this account can read.
-   * @throws {MaximumFeeExceededError} A coordinator's bundle must cost its fee payer within `approveMaxFee`; without `approveMaxFee` the fee is not checked.
+   * @throws {MaximumFeeExceededError} A coordinator's bundle the signer pays for must cost within `approveMaxFee`; a bundle someone else pays for, or no `approveMaxFee`, is not checked.
    */
   async approveProposal (proposalId, { memo, autoExecute } = {}) {
     const index = this._toProposalIndex(proposalId)
@@ -416,7 +416,7 @@ export default class WalletAccountMultisigSquads extends WalletAccountReadOnlyMu
     const bundle = await this._coordinator?.getProposal(index.toString())
 
     if (bundle) {
-      const { approvers, executes, fee } =
+      const { approvers, executes, feePayer, fee } =
         await this._decodeBundle(bundle, multisig.address, proposal.address)
       const twice = approvers.find((member, at) => approvers.indexOf(member) !== at)
 
@@ -434,7 +434,7 @@ export default class WalletAccountMultisigSquads extends WalletAccountReadOnlyMu
 
       const { approveMaxFee } = this._config
 
-      if (approveMaxFee !== undefined && fee > BigInt(approveMaxFee)) {
+      if (approveMaxFee !== undefined && feePayer === signerAddress && fee > BigInt(approveMaxFee)) {
         throw new MaximumFeeExceededError('Exceeded maximum fee cost for the approve operation.')
       }
 
@@ -494,157 +494,6 @@ export default class WalletAccountMultisigSquads extends WalletAccountReadOnlyMu
       status: execution ? 'executed' : 'pending',
       transaction: { hash, fee }
     }
-  }
-
-  /** @private */
-  async _decodeBundle (bundle, multisigAddress, proposalAddress) {
-    const { header, instructions, staticAccounts, addressTableLookups } =
-      getCompiledTransactionMessageDecoder().decode(bundle.messageBytes)
-    const lookups = addressTableLookups ?? []
-    const accounts = [...staticAccounts]
-
-    if (lookups.length) {
-      const tables = await this._getLookupTableAddresses(
-        lookups.map(({ lookupTableAddress }) => ({ accountKey: lookupTableAddress }))
-      )
-      const borrowed = (indexesOf) => lookups.flatMap((lookup) => {
-        const addresses = tables.get(lookup.lookupTableAddress)
-
-        return indexesOf(lookup).map((i) => {
-          if (!addresses[i]) {
-            throw new NoSuchElementError(
-              `The address lookup table ${lookup.lookupTableAddress} holds no address at index ${i}, so the transaction's accounts cannot be resolved.`
-            )
-          }
-
-          return addresses[i]
-        })
-      })
-
-      const writable = borrowed((lookup) => lookup.writableIndexes)
-      const readonly = borrowed((lookup) => lookup.readonlyIndexes)
-
-      accounts.push(...writable, ...readonly)
-    }
-
-    const named = (instruction, slot) => {
-      const index = instruction.accountIndices?.[slot]
-
-      if (!(index < staticAccounts.length)) {
-        throw new ValueError(
-          `The bundle the coordinator holds for the proposal ${proposalAddress} carries a Squads instruction that does not name the multisig, the proposal and the approving member among the ${staticAccounts.length} accounts the bundle itself carries, and a member signs every instruction in it.`
-        )
-      }
-
-      return accounts[index]
-    }
-    const approvers = []
-    let executes = false
-    let price = 0n
-    let units = null
-
-    for (const instruction of instructions) {
-      if (!(instruction.programAddressIndex < staticAccounts.length)) {
-        throw new ValueError(
-          `The bundle the coordinator holds for the proposal ${proposalAddress} carries an instruction whose program is not among the ${staticAccounts.length} accounts the bundle itself carries, and a member signs every instruction in it.`
-        )
-      }
-
-      const program = accounts[instruction.programAddressIndex]
-
-      if (program !== this._programId) {
-        if (program === COMPUTE_BUDGET_PROGRAM_ADDRESS) {
-          if (this._leads(instruction, getSetComputeUnitPriceDiscriminatorBytes())) {
-            price = this._computeBudgetData(
-              instruction, getSetComputeUnitPriceInstructionDataDecoder(), proposalAddress
-            ).microLamports
-          } else if (this._leads(instruction, getSetComputeUnitLimitDiscriminatorBytes())) {
-            units = BigInt(this._computeBudgetData(
-              instruction, getSetComputeUnitLimitInstructionDataDecoder(), proposalAddress
-            ).units)
-          } else if (this._leads(instruction, getRequestUnitsDiscriminatorBytes())) {
-            throw new ValueError(
-              `The bundle the coordinator holds for the proposal ${proposalAddress} asks for compute units the deprecated way, which carries a fee of its own, and a member signs every instruction in it.`
-            )
-          }
-
-          continue
-        }
-
-        if (
-          program === MEMO_PROGRAM_ADDRESS ||
-          (program === SYSTEM_PROGRAM_ADDRESS && this._leads(instruction, getAdvanceNonceAccountDiscriminatorBytes()))
-        ) {
-          continue
-        }
-
-        throw new ValueError(
-          `The bundle the coordinator holds for the proposal ${proposalAddress} carries an instruction for the program ${program}, and a member signs every instruction in it. Only Squads votes on that proposal ride along, beside a compute budget, a memo and a nonce advance.`
-        )
-      }
-
-      const kind = BUNDLE_INSTRUCTION.find(({ discriminator }) => this._leads(instruction, discriminator))
-
-      if (!kind || named(instruction, 0) !== multisigAddress || named(instruction, kind.proposal) !== proposalAddress) {
-        throw new ValueError(
-          `The bundle the coordinator holds for the proposal ${proposalAddress} carries a Squads instruction that neither approves nor executes it on the multisig ${multisigAddress}, and a member signs every instruction in it.`
-        )
-      }
-
-      if (kind.approver === undefined) {
-        executes = true
-      } else {
-        approvers.push(named(instruction, kind.approver))
-      }
-    }
-
-    const granted = instructions.filter(
-      (instruction) => accounts[instruction.programAddressIndex] !== COMPUTE_BUDGET_PROGRAM_ADDRESS
-    ).length
-    const requested = units ?? BigInt(COMPUTE_UNITS_PER_INSTRUCTION * granted)
-    const budget = requested > MAX_COMPUTE_UNITS ? MAX_COMPUTE_UNITS : requested
-    const baseFee = SIGNATURE_BASE_FEE * BigInt(header.numSignerAccounts)
-    const priorityFee =
-      (price * budget + MICRO_LAMPORTS_PER_LAMPORT - 1n) / MICRO_LAMPORTS_PER_LAMPORT
-
-    return { approvers, executes, fee: baseFee + priorityFee }
-  }
-
-  /** @private */
-  _computeBudgetData (instruction, decoder, proposalAddress) {
-    if (instruction.data.length !== decoder.fixedSize) {
-      throw new ValueError(
-        `The bundle the coordinator holds for the proposal ${proposalAddress} carries a compute budget instruction this account cannot read, and a member signs every instruction in it.`
-      )
-    }
-
-    return decoder.decode(instruction.data)
-  }
-
-  /** @private */
-  _leads (instruction, discriminator) {
-    return instruction.data?.length >= discriminator.length &&
-      discriminator.every((byte, offset) => instruction.data[offset] === byte)
-  }
-
-  /** @private */
-  async _quoteMessage (transaction) {
-    const { value } = await this._rpc
-      .getFeeForMessage(getBase64Decoder().decode(transaction.messageBytes), {
-        commitment: this._commitment
-      })
-      .send()
-
-    return value ?? SIGNATURE_BASE_FEE * BigInt(Object.keys(transaction.signatures).length)
-  }
-
-  /** @private */
-  async _sendSignedTransaction (signed, fee) {
-    const hash = await this._rpc
-      .sendTransaction(getBase64EncodedWireTransaction(signed), { encoding: 'base64' })
-      .send()
-
-    return { hash, fee }
   }
 
   /**
@@ -935,6 +784,157 @@ export default class WalletAccountMultisigSquads extends WalletAccountReadOnlyMu
    */
   dispose () {
     this._signerAccount.dispose()
+  }
+
+  /** @private */
+  async _decodeBundle (bundle, multisigAddress, proposalAddress) {
+    const { header, instructions, staticAccounts, addressTableLookups } =
+      getCompiledTransactionMessageDecoder().decode(bundle.messageBytes)
+    const lookups = addressTableLookups ?? []
+    const accounts = [...staticAccounts]
+
+    if (lookups.length) {
+      const tables = await this._getLookupTableAddresses(
+        lookups.map(({ lookupTableAddress }) => ({ accountKey: lookupTableAddress }))
+      )
+      const borrowed = (indexesOf) => lookups.flatMap((lookup) => {
+        const addresses = tables.get(lookup.lookupTableAddress)
+
+        return indexesOf(lookup).map((i) => {
+          if (!addresses[i]) {
+            throw new NoSuchElementError(
+              `The address lookup table ${lookup.lookupTableAddress} holds no address at index ${i}, so the transaction's accounts cannot be resolved.`
+            )
+          }
+
+          return addresses[i]
+        })
+      })
+
+      const writable = borrowed((lookup) => lookup.writableIndexes)
+      const readonly = borrowed((lookup) => lookup.readonlyIndexes)
+
+      accounts.push(...writable, ...readonly)
+    }
+
+    const named = (instruction, slot) => {
+      const index = instruction.accountIndices?.[slot]
+
+      if (!(index < staticAccounts.length)) {
+        throw new ValueError(
+          `The bundle the coordinator holds for the proposal ${proposalAddress} carries a Squads instruction that does not name the multisig, the proposal and the approving member among the ${staticAccounts.length} accounts the bundle itself carries, and a member signs every instruction in it.`
+        )
+      }
+
+      return accounts[index]
+    }
+    const approvers = []
+    let executes = false
+    let price = 0n
+    let units = null
+
+    for (const instruction of instructions) {
+      if (!(instruction.programAddressIndex < staticAccounts.length)) {
+        throw new ValueError(
+          `The bundle the coordinator holds for the proposal ${proposalAddress} carries an instruction whose program is not among the ${staticAccounts.length} accounts the bundle itself carries, and a member signs every instruction in it.`
+        )
+      }
+
+      const program = accounts[instruction.programAddressIndex]
+
+      if (program === COMPUTE_BUDGET_PROGRAM_ADDRESS) {
+        if (this._leads(instruction, getSetComputeUnitPriceDiscriminatorBytes())) {
+          price = this._computeBudgetData(
+            instruction, getSetComputeUnitPriceInstructionDataDecoder(), proposalAddress
+          ).microLamports
+        } else if (this._leads(instruction, getSetComputeUnitLimitDiscriminatorBytes())) {
+          units = BigInt(this._computeBudgetData(
+            instruction, getSetComputeUnitLimitInstructionDataDecoder(), proposalAddress
+          ).units)
+        } else if (this._leads(instruction, getRequestUnitsDiscriminatorBytes())) {
+          throw new ValueError(
+            `The bundle the coordinator holds for the proposal ${proposalAddress} asks for compute units the deprecated way, which carries a fee of its own, and a member signs every instruction in it.`
+          )
+        }
+
+        continue
+      }
+
+      if (
+        program === MEMO_PROGRAM_ADDRESS ||
+        (program === SYSTEM_PROGRAM_ADDRESS && this._leads(instruction, getAdvanceNonceAccountDiscriminatorBytes()))
+      ) {
+        continue
+      }
+
+      if (program !== this._programId) {
+        throw new ValueError(
+          `The bundle the coordinator holds for the proposal ${proposalAddress} carries an instruction for the program ${program}, and a member signs every instruction in it. Only Squads votes on that proposal ride along, beside a compute budget, a memo and a nonce advance.`
+        )
+      }
+
+      const kind = BUNDLE_INSTRUCTION.find(({ discriminator }) => this._leads(instruction, discriminator))
+
+      if (!kind || named(instruction, 0) !== multisigAddress || named(instruction, kind.proposal) !== proposalAddress) {
+        throw new ValueError(
+          `The bundle the coordinator holds for the proposal ${proposalAddress} carries a Squads instruction that neither approves nor executes it on the multisig ${multisigAddress}, and a member signs every instruction in it.`
+        )
+      }
+
+      if (kind.approver === undefined) {
+        executes = true
+      } else {
+        approvers.push(named(instruction, kind.approver))
+      }
+    }
+
+    const granted = instructions.filter(
+      (instruction) => accounts[instruction.programAddressIndex] !== COMPUTE_BUDGET_PROGRAM_ADDRESS
+    ).length
+    const requested = units ?? BigInt(COMPUTE_UNITS_PER_INSTRUCTION * granted)
+    const budget = requested > MAX_COMPUTE_UNITS ? MAX_COMPUTE_UNITS : requested
+    const baseFee = SIGNATURE_BASE_FEE * BigInt(header.numSignerAccounts)
+    const priorityFee =
+      (price * budget + MICRO_LAMPORTS_PER_LAMPORT - 1n) / MICRO_LAMPORTS_PER_LAMPORT
+
+    return { approvers, executes, feePayer: staticAccounts[0], fee: baseFee + priorityFee }
+  }
+
+  /** @private */
+  _computeBudgetData (instruction, decoder, proposalAddress) {
+    if (instruction.data.length !== decoder.fixedSize) {
+      throw new ValueError(
+        `The bundle the coordinator holds for the proposal ${proposalAddress} carries a compute budget instruction this account cannot read, and a member signs every instruction in it.`
+      )
+    }
+
+    return decoder.decode(instruction.data)
+  }
+
+  /** @private */
+  _leads (instruction, discriminator) {
+    return instruction.data?.length >= discriminator.length &&
+      discriminator.every((byte, offset) => instruction.data[offset] === byte)
+  }
+
+  /** @private */
+  async _quoteMessage (transaction) {
+    const { value } = await this._rpc
+      .getFeeForMessage(getBase64Decoder().decode(transaction.messageBytes), {
+        commitment: this._commitment
+      })
+      .send()
+
+    return value ?? SIGNATURE_BASE_FEE * BigInt(Object.keys(transaction.signatures).length)
+  }
+
+  /** @private */
+  async _sendSignedTransaction (signed, fee) {
+    const hash = await this._rpc
+      .sendTransaction(getBase64EncodedWireTransaction(signed), { encoding: 'base64' })
+      .send()
+
+    return { hash, fee }
   }
 
   /** @private */
